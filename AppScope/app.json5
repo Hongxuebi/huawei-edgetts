@@ -1,0 +1,14 @@
+{
+  "app": {
+    "bundleName": "com.example.woderiji",
+    "vendor": "example",
+    "versionCode": 1000000,
+    "versionName": "1.0.0",
+    "icon": "$media:layered_image",
+    "label": "$string:app_name",
+    "apiReleaseType": "Release1",
+    "minAPIVersion": 11,
+    "bundleType": "app",
+    "debug": true
+  }
+}
