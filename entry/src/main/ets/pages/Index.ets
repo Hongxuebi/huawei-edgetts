@@ -351,19 +351,27 @@ struct Index {
           return;
         }
 
-        // 3. 写 HTML（引用 WAV）
+        // 3. 写 HTML（引用 WAV，带时间戳防缓存）
+        const cacheBuster: number = Date.now();
         const htmlPath: string = sandboxDir + '/tts_play.html';
-        const html: string = '<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><style>body{margin:0;padding:20px;font-family:sans-serif;text-align:center}button{padding:15px 30px;font-size:18px;background:#007aff;color:#fff;border:none;border-radius:8px;cursor:pointer}#s{margin:10px 0;color:#333}audio{width:100%;margin-top:10px;display:none}</style></head><body><button id="b" onclick="document.getElementById(\'p\').play();this.style.display=\'none\';">▶ 播放</button><div id="s">就绪</div><audio id="p" src="tts_audio.wav" preload="auto" controls></audio></body></html>';
+        const html: string = '<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><style>body{margin:0;padding:20px;font-family:sans-serif;text-align:center}button{padding:15px 30px;font-size:18px;background:#007aff;color:#fff;border:none;border-radius:8px;cursor:pointer}#s{margin:10px 0;color:#333}audio{width:100%;margin-top:10px;display:none}</style></head><body><button id="b" onclick="document.getElementById(\'p\').play();this.style.display=\'none\';">▶ 播放</button><div id="s">就绪</div><audio id="p" src="tts_audio.wav?t=' + cacheBuster + '" preload="auto" controls></audio></body></html>';
         const htmlFile: fileIo.File = fileIo.openSync(htmlPath, fileIo.OpenMode.CREATE | fileIo.OpenMode.WRITE_ONLY | fileIo.OpenMode.TRUNC);
         fileIo.writeSync(htmlFile.fd, html);
         fileIo.closeSync(htmlFile.fd);
         this.log('播放页面已写入: ' + htmlPath);
 
-        // 5. 从沙箱加载
-        this.controller.loadUrl('file://' + htmlPath);
+        // 5. 从沙箱加载（也加时间戳防 HTML 缓存）
+        this.controller.loadUrl('file://' + htmlPath + '?t=' + cacheBuster);
         this.log('已加载播放页面');
         this.showPlayBtn = true;
         this.status = '就绪，点击播放按钮';
+
+        // 关闭 WS 并重置播放状态，允许立即再次朗读
+        if (this.ws) {
+          try { this.ws.close(); } catch (_e) { }
+          this.ws = null;
+        }
+        this.isPlaying = false;
       } catch (e) {
         const we: BusinessError = e as BusinessError;
         this.log('写文件/播放失败: ' + we.message, true);
