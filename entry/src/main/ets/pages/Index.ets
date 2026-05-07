@@ -2,7 +2,7 @@ import { webSocket } from '@kit.NetworkKit';
 import { cryptoFramework } from '@kit.CryptoArchitectureKit';
 import { BusinessError, pasteboard } from '@kit.BasicServicesKit';
 import { util } from '@kit.ArkTS';
-import { webview } from '@kit.ArkWeb';
+import { audio } from '@kit.AudioKit';
 import { fileIo, picker } from '@kit.CoreFileKit';
 import mp3Decoder from 'libmp3_decoder.so';
 // ===== 类型定义 =====
@@ -78,9 +78,7 @@ struct Index {
   @State isPlaying: boolean = false
   @State logs: string[] = []
 
-  private controller: webview.WebviewController = new webview.WebviewController()
-  @State showPlayBtn: boolean = false
-  @State audioFilePath: string = ''
+  private audioRenderer: audio.AudioRenderer | null = null
 
   private ws: webSocket.WebSocket | null = null
   private audioChunks: Uint8Array[] = []
@@ -134,8 +132,14 @@ struct Index {
       try { this.ws.close(); } catch (_e) { }
       this.ws = null;
     }
-    // WebView 音频由用户控制
-    this.showPlayBtn = false;
+    // 停止 AudioRenderer
+    if (this.audioRenderer) {
+      try {
+        this.audioRenderer.stop();
+        this.audioRenderer.release();
+      } catch (_e) { }
+      this.audioRenderer = null;
+    }
     this.audioChunks = [];
     this.audioSize = 0;
     this.isPlaying = false;
@@ -351,20 +355,65 @@ struct Index {
           return;
         }
 
-        // 3. 写 HTML（引用 WAV，带时间戳防缓存）
-        const cacheBuster: number = Date.now();
-        const htmlPath: string = sandboxDir + '/tts_play.html';
-        const html: string = '<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><style>body{margin:0;padding:20px;font-family:sans-serif;text-align:center}button{padding:15px 30px;font-size:18px;background:#007aff;color:#fff;border:none;border-radius:8px;cursor:pointer}#s{margin:10px 0;color:#333}audio{width:100%;margin-top:10px;display:none}</style></head><body><button id="b" onclick="document.getElementById(\'p\').play();this.style.display=\'none\';">▶ 播放</button><div id="s">就绪</div><audio id="p" src="tts_audio.wav?t=' + cacheBuster + '" preload="auto" controls></audio></body></html>';
-        const htmlFile: fileIo.File = fileIo.openSync(htmlPath, fileIo.OpenMode.CREATE | fileIo.OpenMode.WRITE_ONLY | fileIo.OpenMode.TRUNC);
-        fileIo.writeSync(htmlFile.fd, html);
-        fileIo.closeSync(htmlFile.fd);
-        this.log('播放页面已写入: ' + htmlPath);
+        // 3. 原生 AudioRenderer 直接播放 PCM（跳过 WebView，无 autoplay 限制）
+        try {
+          const wavStat = fileIo.statSync(wavPath);
+          const wavBuf: ArrayBuffer = new ArrayBuffer(wavStat.size);
+          const wavFile: fileIo.File = fileIo.openSync(wavPath, fileIo.OpenMode.READ_ONLY);
+          fileIo.readSync(wavFile.fd, wavBuf);
+          fileIo.closeSync(wavFile.fd);
+          const wavBytes: Uint8Array = new Uint8Array(wavBuf);
+          const pcmData: Uint8Array = new Uint8Array(wavBytes.slice(44));
+          this.log('PCM \u6570\u636E: ' + pcmData.length + ' \u5B57\u8282');
 
-        // 5. 从沙箱加载（也加时间戳防 HTML 缓存）
-        this.controller.loadUrl('file://' + htmlPath + '?t=' + cacheBuster);
-        this.log('已加载播放页面');
-        this.showPlayBtn = true;
-        this.status = '就绪，点击播放按钮';
+          const renderer: audio.AudioRenderer = await new Promise<audio.AudioRenderer>(
+            (resolve: (value: audio.AudioRenderer) => void, reject: (reason?: Error) => void): void => {
+              audio.createAudioRenderer({
+                streamInfo: {
+                  samplingRate: audio.AudioSamplingRate.SAMPLE_RATE_24000,
+                  channels: audio.AudioChannel.CHANNEL_1,
+                  sampleFormat: audio.AudioSampleFormat.SAMPLE_FORMAT_S16LE,
+                  encodingType: audio.AudioEncodingType.ENCODING_TYPE_RAW
+                },
+                rendererInfo: {
+                  content: audio.ContentType.CONTENT_TYPE_SPEECH,
+                  usage: audio.StreamUsage.STREAM_USAGE_MEDIA,
+                  rendererFlags: 0
+                }
+              }, (err: BusinessError, data: audio.AudioRenderer): void => {
+                if (err) { reject(new Error(err.message)); }
+                else { resolve(data); }
+              });
+            });
+          this.audioRenderer = renderer;
+          this.log('AudioRenderer \u5DF2\u521B\u5EFA');
+
+          await renderer.start();
+          this.log('AudioRenderer \u5DF2\u542F\u52A8');
+          this.status = '\u64AD\u653E\u4E2D...';
+
+          const written: number = await renderer.write(pcmData.buffer as ArrayBuffer);
+          this.log('\u64AD\u653E\u5B8C\u6210: ' + written + ' \u5B57\u8282\u5199\u5165');
+          this.status = '\u64AD\u653E\u5B8C\u6210';
+
+          renderer.stop();
+          renderer.release();
+          this.audioRenderer = null;
+
+
+        } catch (e) {
+          if (this.audioRenderer) {
+            try { this.audioRenderer.release(); } catch (_e) { }
+            this.audioRenderer = null;
+          }
+          if (this.cancelled) {
+            this.log('\u64AD\u653E\u5DF2\u505C\u6B62');
+            this.status = '\u5DF2\u505C\u6B62';
+          } else {
+            this.log('\u64AD\u653E\u5931\u8D25: ' + (e as Error).message, true);
+            this.status = '\u64AD\u653E\u5931\u8D25';
+          }
+        }
 
         // 关闭 WS 并重置播放状态，允许立即再次朗读
         if (this.ws) {
@@ -421,8 +470,6 @@ struct Index {
       .replace(/"/g, '&quot;')
       .replace(/'/g, '&apos;');
   }
-
-  // 已移除 AVPlayer（WebView 替代）
 
   build() {
     Column() {
@@ -521,7 +568,6 @@ struct Index {
             .padding({ top: 8 })
             .lineHeight(18)
 
-        // WebView 内部播放按钮（在 tts.html 中）
         }
         .padding({ left: 14, right: 14 })
       }
@@ -569,15 +615,6 @@ struct Index {
       .backgroundColor('#fafafa')
       .listDirection(Axis.Vertical)
 
-      // 隐藏 WebView（用于播放 24kHz MP3）
-      Web({ src: $rawfile('tts.html'), controller: this.controller })
-        .height(90)
-        .width('100%')
-        .fileAccess(true)
-        .onConsole((e) => {
-          this.log('[WebView] msg=' + e.message.getMessage());
-          return false;
-        })
     }
     .width('100%')
     .height('100%')
